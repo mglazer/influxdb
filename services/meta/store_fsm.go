@@ -31,7 +31,13 @@ func (fsm *storeFSM) Apply(l *raft.Log) interface{} {
 		case internal.Command_RemovePeerCommand:
 			return fsm.applyRemovePeerCommand(&cmd)
 		case internal.Command_CreateNodeCommand:
-			return fsm.applyCreateNodeCommand(&cmd)
+			// create node was in < 0.10.0 servers, we need the peers
+			// list to convert to the appropriate data/meta nodes now
+			peers, err := s.raftState.peers()
+			if err != nil {
+				return err
+			}
+			return fsm.applyCreateNodeCommand(&cmd, peers)
 		case internal.Command_DeleteNodeCommand:
 			return fsm.applyDeleteNodeCommand(&cmd)
 		case internal.Command_CreateDatabaseCommand:
@@ -104,24 +110,34 @@ func (fsm *storeFSM) applyRemovePeerCommand(cmd *internal.Command) interface{} {
 		}
 	}
 
-	// If this is the node being shutdown, close raft
-	if fsm.id == id {
-		fsm.logger.Printf("shutting down raft for %s", addr)
-		if err := fsm.raftState.close(); err != nil {
-			fsm.logger.Printf("failed to shut down raft: %s", err)
-		}
-	}
-
 	return nil
 }
 
-func (fsm *storeFSM) applyCreateNodeCommand(cmd *internal.Command) interface{} {
+func (fsm *storeFSM) applyCreateNodeCommand(cmd *internal.Command, peers []string) interface{} {
 	ext, _ := proto.GetExtension(cmd, internal.E_CreateNodeCommand_Command)
 	v := ext.(*internal.CreateNodeCommand)
 
 	// Copy data and update.
 	other := fsm.data.Clone()
-	if err := other.CreateNode(v.GetHost()); err != nil {
+
+	// CreateNode is a command from < 0.10.0 clusters. Every node in
+	// those clusters would be a data node and only the nodes that are
+	// in the list of peers would be meta nodes
+	isMeta := false
+	for _, p := range peers {
+		if v.GetHost() == p {
+			isMeta = true
+			break
+		}
+	}
+
+	if isMeta {
+		if err := other.CreateMetaNode(v.GetHost()); err != nil {
+			return err
+		}
+	}
+
+	if err := other.CreateDataNode(v.GetHost()); err != nil {
 		return err
 	}
 
@@ -134,37 +150,32 @@ func (fsm *storeFSM) applyCreateNodeCommand(cmd *internal.Command) interface{} {
 	return nil
 }
 
+// applyUpdateNodeCommand was in < 0.10.0, noop this now
 func (fsm *storeFSM) applyUpdateNodeCommand(cmd *internal.Command) interface{} {
-	ext, _ := proto.GetExtension(cmd, internal.E_UpdateNodeCommand_Command)
-	v := ext.(*internal.UpdateNodeCommand)
+	return nil
+}
+
+func (fsm *storeFSM) applyUpdateDataNodeCommand(cmd *internal.Command) interface{} {
+	ext, _ := proto.GetExtension(cmd, internal.E_CreateNodeCommand_Command)
+	v := ext.(*internal.UpdateDataNodeCommand)
 
 	// Copy data and update.
 	other := fsm.data.Clone()
-	ni := other.Node(v.GetID())
-	if ni == nil {
+
+	node := other.DataNode(v.GetID())
+	if node == nil {
 		return ErrNodeNotFound
 	}
 
-	ni.Host = v.GetHost()
+	node.Host = v.GetHost()
+	node.TCPHost = v.GetTCPHost()
 
 	fsm.data = other
 	return nil
 }
 
+// applyDeleteNodeCommand is from < 0.10.0. no op for this one
 func (fsm *storeFSM) applyDeleteNodeCommand(cmd *internal.Command) interface{} {
-	ext, _ := proto.GetExtension(cmd, internal.E_DeleteNodeCommand_Command)
-	v := ext.(*internal.DeleteNodeCommand)
-
-	// Copy data and update.
-	other := fsm.data.Clone()
-	if err := other.DeleteNode(v.GetID(), v.GetForce()); err != nil {
-		return err
-	}
-	fsm.data = other
-
-	id := v.GetID()
-	fsm.logger.Printf("node '%d' removed", id)
-
 	return nil
 }
 

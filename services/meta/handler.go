@@ -19,10 +19,6 @@ import (
 	"github.com/influxdb/influxdb/uuid"
 )
 
-// execMagic is the first 4 bytes sent to a remote exec connection to verify
-// that it is coming from a remote exec client connection.
-const execMagic = "EXEC"
-
 // handler represents an HTTP handler for the meta service.
 type handler struct {
 	config  *Config
@@ -34,7 +30,6 @@ type handler struct {
 	store          interface {
 		afterIndex(index uint64) <-chan struct{}
 		index() uint64
-		isLeader() bool
 		leader() string
 		snapshot() (*Data, error)
 		apply(b []byte) error

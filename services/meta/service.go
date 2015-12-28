@@ -8,10 +8,19 @@ import (
 	"net/http"
 	"os"
 	"strings"
+
+	"github.com/influxdb/influxdb"
+)
+
+const (
+	MuxHeader = 8
 )
 
 type Service struct {
+	RaftListener net.Listener
+
 	config   *Config
+	node     *influxdb.Node
 	handler  *handler
 	ln       net.Listener
 	raftAddr string
@@ -24,11 +33,11 @@ type Service struct {
 }
 
 // NewService returns a new instance of Service.
-func NewService(c *Config) *Service {
+func NewService(c *Config, node *influxdb.Node) *Service {
 	s := &Service{
 		config:   c,
-		raftAddr: c.RaftBindAddress,
-		httpAddr: c.HTTPdBindAddress,
+		raftAddr: c.BindAddress,
+		httpAddr: c.HTTPBindAddress,
 		https:    c.HTTPSEnabled,
 		cert:     c.HTTPSCertificate,
 		err:      make(chan error),
@@ -41,18 +50,19 @@ func NewService(c *Config) *Service {
 func (s *Service) Open() error {
 	s.Logger.Println("Starting meta service")
 
+	if s.RaftListener == nil {
+		panic("no raft listener set")
+	}
+
 	// Open the store
-	store := newStore(s.config)
-	// Set the peers from the config
-	store.peers = s.config.Peers
-	s.store = store
-	if err := s.store.open(); err != nil {
+	s.store = newStore(s.config)
+	if err := s.store.open(s.ln, s.RaftListener); err != nil {
 		return err
 	}
 
 	handler := newHandler(s.config)
 	handler.logger = s.Logger
-	handler.store = store
+	handler.store = s.store
 	s.handler = handler
 
 	// Open listener.

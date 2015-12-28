@@ -34,21 +34,21 @@ type raftState struct {
 	peerStore  raft.PeerStore
 	raftStore  *raftboltdb.BoltStore
 	raftLayer  *raftLayer
-	joinPeers  []string
 	ln         net.Listener
 	logger     *log.Logger
 	remoteAddr net.Addr
 	path       string
 }
 
-func newRaftState(c *Config, joinPeers []string) *raftState {
+func newRaftState(c *Config) *raftState {
 	return &raftState{
-		config:    c,
-		joinPeers: joinPeers,
+		config: c,
 	}
 }
 
-func (r *raftState) open(s *store) error {
+func (r *raftState) open(s *store, initializePeers []string) error {
+	r.remoteAddr = r.ln.Addr()
+	fmt.Println(">", r.ln, r.ln.Addr())
 	r.closing = make(chan struct{})
 
 	// Setup raft configuration.
@@ -66,13 +66,6 @@ func (r *raftState) open(s *store) error {
 	// If in the future we decide to call remove peer we have to re-evaluate how to handle this
 	config.ShutdownOnRemove = false
 
-	// If no peers are set in the config or there is one and we are it, then start as a single server.
-	if len(r.joinPeers) <= 1 {
-		config.EnableSingleNode = true
-		// Ensure we can always become the leader
-		config.DisableBootstrapAfterElect = false
-	}
-
 	// Build raft layer to multiplex listener.
 	r.raftLayer = newRaftLayer(r.ln, r.remoteAddr)
 
@@ -82,14 +75,27 @@ func (r *raftState) open(s *store) error {
 	// Create peer storage.
 	r.peerStore = raft.NewJSONPeers(r.path, r.transport)
 
+	// This server is joining the raft cluster for the first time if initializePeers are passed in
+	if len(initializePeers) > 0 {
+		if err := r.peerStore.SetPeers(initializePeers); err != nil {
+			return err
+		}
+	}
+
 	peers, err := r.peerStore.Peers()
 	if err != nil {
 		return err
 	}
 
-	// For single-node clusters, we can update the raft peers before we start the cluster if the hostname
-	// has changed.
-	if config.EnableSingleNode {
+	// If no peers are set in the config or there is one and we are it, then start as a single server.
+	if len(peers) <= 1 {
+		config.EnableSingleNode = true
+
+		// Ensure we can always become the leader
+		config.DisableBootstrapAfterElect = false
+
+		// For single-node clusters, we can update the raft peers before we start the cluster if the hostname
+		// has changed.
 		if err := r.peerStore.SetPeers([]string{r.remoteAddr.String()}); err != nil {
 			return err
 		}
@@ -176,22 +182,6 @@ func (r *raftState) close() error {
 	return nil
 }
 
-func (r *raftState) initialize() error {
-	// If we have committed entries then the store is already in the cluster.
-	if index, err := r.raftStore.LastIndex(); err != nil {
-		return fmt.Errorf("last index: %s", err)
-	} else if index > 0 {
-		return nil
-	}
-
-	// Force set peers.
-	if err := r.setPeers(r.joinPeers); err != nil {
-		return fmt.Errorf("set raft peers: %s", err)
-	}
-
-	return nil
-}
-
 // apply applies a serialized command to the raft log.
 func (r *raftState) apply(b []byte) error {
 	// Apply to raft log.
@@ -224,15 +214,6 @@ func (r *raftState) snapshot() error {
 
 // addPeer adds addr to the list of peers in the cluster.
 func (r *raftState) addPeer(addr string) error {
-	peers, err := r.peerStore.Peers()
-	if err != nil {
-		return err
-	}
-
-	if len(peers) >= 3 {
-		return nil
-	}
-
 	if fut := r.raft.AddPeer(addr); fut.Error() != nil {
 		return fut.Error()
 	}
@@ -249,11 +230,6 @@ func (r *raftState) removePeer(addr string) error {
 		return fut.Error()
 	}
 	return nil
-}
-
-// setPeers sets a list of peers in the cluster.
-func (r *raftState) setPeers(addrs []string) error {
-	return r.raft.SetPeers(addrs).Error()
 }
 
 func (r *raftState) peers() ([]string, error) {
