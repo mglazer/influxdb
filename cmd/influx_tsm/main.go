@@ -40,6 +40,7 @@ be ignored by the system since they are not registered with the cluster.
 To restore a backup, delete the tsm version, rename the backup and
 restart the node.`, backupExt)
 
+var dataPath string
 var ds string
 var tsmSz uint64
 var parallel bool
@@ -65,7 +66,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "No data directory specified\n")
 		os.Exit(1)
 	}
-	dataPath := flag.Args()[0]
+	dataPath = flag.Args()[0]
 
 	if tsmSz > maxTSMSz {
 		fmt.Fprintf(os.Stderr, "Maximum TSM file size is %d\n", maxTSMSz)
@@ -148,51 +149,14 @@ func main() {
 
 	// Convert each shard.
 	for _, si := range shards {
-		src := si.FullPath(dataPath)
-		dst := fmt.Sprintf("%s.%s", src, tsmExt)
-
-		var reader ShardReader
-		switch si.Format {
-		case tsdb.BZ1:
-			reader = bz1.NewReader(src)
-		case tsdb.B1:
-			reader = b1.NewReader(src)
-		default:
-			fmt.Printf("Unsupported shard format: %s\n", si.FormatAsString())
-			os.Exit(1)
-		}
-
-		// Open the shard, and create a converter.
-		if err := reader.Open(); err != nil {
-			fmt.Printf("Failed to open %s for conversion: %s\n", src, err.Error())
-			os.Exit(1)
-		}
-		converter := NewConverter(dst, uint32(tsmSz))
-
-		// Perform the conversion.
 		start := time.Now()
-		if err := converter.Process(reader); err != nil {
-			fmt.Printf("Conversion of %s failed: %s\n", src, err.Error())
-			os.Exit(1)
-		}
-
-		// Delete source shard, and rename new tsm1 shard.
-		if err := reader.Close(); err != nil {
-			fmt.Printf("Conversion of %s failed due to close: %s\n", src, err.Error())
-			os.Exit(1)
-		}
-
-		if err := os.RemoveAll(si.FullPath(dataPath)); err != nil {
-			fmt.Printf("Deletion of %s failed: %s\n", src, err.Error())
-			os.Exit(1)
-		}
-		if err := os.Rename(dst, src); err != nil {
-			fmt.Printf("Rename of %s to %s failed: %s", dst, src, err.Error())
+		if err := convertShard(si); err != nil {
+			fmt.Printf("Failed to convert %s: %s\n", si.FullPath(dataPath), err.Error())
 			os.Exit(1)
 		}
 
 		// Success!
-		fmt.Printf("Conversion of %s successful (%s)\n", src, time.Now().Sub(start))
+		fmt.Printf("Conversion of %s successful (%s)\n", si.FullPath(dataPath), time.Now().Sub(start))
 	}
 }
 
@@ -242,4 +206,45 @@ func copyDir(dest, src string) error {
 	}
 
 	return filepath.Walk(src, copyFile)
+}
+
+// convertShard converts the shard in-place.
+func convertShard(si *tsdb.ShardInfo) error {
+	src := si.FullPath(dataPath)
+	dst := fmt.Sprintf("%s.%s", src, tsmExt)
+
+	var reader ShardReader
+	switch si.Format {
+	case tsdb.BZ1:
+		reader = bz1.NewReader(src)
+	case tsdb.B1:
+		reader = b1.NewReader(src)
+	default:
+		return fmt.Errorf("Unsupported shard format: %s", si.FormatAsString())
+	}
+
+	// Open the shard, and create a converter.
+	if err := reader.Open(); err != nil {
+		return fmt.Errorf("Failed to open %s for conversion: %s", src, err.Error())
+	}
+	converter := NewConverter(dst, uint32(tsmSz))
+
+	// Perform the conversion.
+	if err := converter.Process(reader); err != nil {
+		return fmt.Errorf("Conversion of %s failed: %s", src, err.Error())
+	}
+
+	// Delete source shard, and rename new tsm1 shard.
+	if err := reader.Close(); err != nil {
+		return fmt.Errorf("Conversion of %s failed due to close: %s", src, err.Error())
+	}
+
+	if err := os.RemoveAll(si.FullPath(dataPath)); err != nil {
+		return fmt.Errorf("Deletion of %s failed: %s", src, err.Error())
+	}
+	if err := os.Rename(dst, src); err != nil {
+		return fmt.Errorf("Rename of %s to %s failed: %s", dst, src, err.Error())
+	}
+
+	return nil
 }
