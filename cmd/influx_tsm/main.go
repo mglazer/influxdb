@@ -42,12 +42,14 @@ restart the node.`, backupExt)
 
 var ds string
 var tsmSz uint64
+var parallel bool
 
 const maxTSMSz = 1 * 1024 * 1024 * 1024
 
 func init() {
 	flag.StringVar(&ds, "dbs", "", "Comma-delimited list of databases to convert. Default is to convert all")
 	flag.Uint64Var(&tsmSz, "sz", maxTSMSz, "Maximum size of individual TSM files.")
+	flag.BoolVar(&parallel, "parallel", false, "Perform parallel conversion.")
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: %s <data-path> \n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "%s\n\n", description)
