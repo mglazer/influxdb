@@ -34,6 +34,7 @@ type Client struct {
 
 func NewClient(metaServers []string, tls bool) *Client {
 	client := &Client{
+		data:        &Data{},
 		metaServers: metaServers,
 		tls:         tls,
 		logger:      log.New(os.Stderr, "[metaclient] ", log.LstdFlags),
@@ -104,14 +105,11 @@ func (c *Client) CreateDatabase(name string) (*DatabaseInfo, error) {
 		Name: proto.String(name),
 	}
 
-	ch := c.WaitForDataChanged()
-
 	err := c.retryUntilExec(internal.Command_CreateDatabaseCommand, internal.E_CreateDatabaseCommand_Command, cmd)
 	if err != nil {
 		return nil, err
 	}
 
-	<-ch
 	return c.Database(name)
 }
 
@@ -278,19 +276,28 @@ func (c *Client) MetaServers() []string {
 	return c.metaServers
 }
 
+func (c *Client) index() uint64 {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.data.Index
+}
+
 // retryUntilExec will attempt the command on each of the metaservers and return on the first success
 func (c *Client) retryUntilExec(typ internal.Command_Type, desc *proto.ExtensionDesc, value interface{}) error {
 	var err error
+	var index uint64
 	for _, s := range c.MetaServers() {
-		err = c.exec(s, typ, desc, value)
+		index, err = c.exec(s, typ, desc, value)
 		if err == nil {
+			c.waitForIndex(index)
 			return nil
 		}
 	}
+
 	return err
 }
 
-func (c *Client) exec(addr string, typ internal.Command_Type, desc *proto.ExtensionDesc, value interface{}) error {
+func (c *Client) exec(addr string, typ internal.Command_Type, desc *proto.ExtensionDesc, value interface{}) (index uint64, err error) {
 	// Create command.
 	cmd := &internal.Command{Type: &typ}
 	if err := proto.SetExtension(cmd, desc, value); err != nil {
@@ -299,9 +306,10 @@ func (c *Client) exec(addr string, typ internal.Command_Type, desc *proto.Extens
 
 	b, err := proto.Marshal(cmd)
 	if err != nil {
-		return err
+		return 0, err
 	}
 
+	// execute against the metaserver
 	url := fmt.Sprintf("://%s/execute", addr)
 	if c.tls {
 		url = "https" + url
@@ -311,13 +319,40 @@ func (c *Client) exec(addr string, typ internal.Command_Type, desc *proto.Extens
 
 	resp, err := http.Post(url, "application/octet-stream", bytes.NewBuffer(b))
 	if err != nil {
-		return err
+		return 0, err
 	}
+	defer resp.Body.Close()
+
+	// read the response
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("unexpected result:\n\texp: %d\n\tgot: %d\n", http.StatusOK, resp.StatusCode)
+		return 0, fmt.Errorf("unexpected result:\n\texp: %d\n\tgot: %d\n", http.StatusOK, resp.StatusCode)
 	}
 
-	return nil
+	res := &internal.Response{}
+
+	b, err = ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return 0, err
+	}
+
+	if err := proto.Unmarshal(b, res); err != nil {
+		return 0, err
+	}
+
+	return res.GetIndex(), nil
+}
+
+func (c *Client) waitForIndex(idx uint64) {
+	for {
+		c.mu.RLock()
+		if c.data.Index >= idx {
+			c.mu.RUnlock()
+			return
+		}
+		ch := c.changed
+		c.mu.RUnlock()
+		<-ch
+	}
 }
 
 func (c *Client) pollForUpdates() {
@@ -367,6 +402,7 @@ func (c *Client) retryUntilSnapshot() *Data {
 	for {
 		// get the index to look from and the server to poll
 		c.mu.RLock()
+
 		idx := c.data.Index
 		if currentServer >= len(c.metaServers) {
 			currentServer = 0

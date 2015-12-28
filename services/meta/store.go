@@ -13,6 +13,8 @@ import (
 	"github.com/hashicorp/raft"
 )
 
+const raftListenerStartupTimeout = time.Second
+
 type store struct {
 	mu      sync.RWMutex
 	closing chan struct{}
@@ -21,9 +23,6 @@ type store struct {
 	data        *Data
 	raftState   *raftState
 	dataChanged chan struct{}
-	addr        string
-	raftln      net.Listener
-	httpln      net.Listener
 	path        string
 	opened      bool
 	logger      *log.Logger
@@ -58,16 +57,27 @@ func newStore(c *Config) *store {
 }
 
 // open opens and initializes the raft store.
-func (s *store) open(httpln, raftln net.Listener) error {
-	s.raftln = raftln
-	s.httpln = httpln
+func (s *store) open(addr string, raftln net.Listener) error {
 	s.logger.Printf("Using data dir: %v", s.path)
+
+	// wait for the raft listener to start
+	timeout := time.Now().Add(raftListenerStartupTimeout)
+	for {
+		if raftln.Addr() != nil {
+			break
+		}
+
+		if time.Now().After(timeout) {
+			return fmt.Errorf("unable to open without raft listener running")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 
 	// See if this server needs to join the raft consensus group
 	var initializePeers []string
 	if len(s.config.JoinPeers) > 0 {
 		var err error
-		initializePeers, err = s.joinCluster(s.config.JoinPeers)
+		initializePeers, err = s.joinCluster(addr, raftln.Addr().String(), s.config.JoinPeers)
 		if err != nil {
 			return err
 		}
@@ -89,7 +99,7 @@ func (s *store) open(httpln, raftln net.Listener) error {
 		}
 
 		// Open the raft store.
-		if err := s.openRaft(initializePeers); err != nil {
+		if err := s.openRaft(initializePeers, raftln); err != nil {
 			return fmt.Errorf("raft: %s", err)
 		}
 
@@ -103,13 +113,12 @@ func (s *store) open(httpln, raftln net.Listener) error {
 	return s.waitForLeader(0)
 }
 
-func (s *store) openRaft(initializePeers []string) error {
+func (s *store) openRaft(initializePeers []string, raftln net.Listener) error {
 	rs := newRaftState(s.config)
-	rs.ln = s.raftln
 	rs.logger = s.logger
 	rs.path = s.path
-	rs.remoteAddr = s.raftln.Addr()
-	if err := rs.open(s, initializePeers); err != nil {
+
+	if err := rs.open(s, raftln, initializePeers); err != nil {
 		return err
 	}
 	s.raftState = rs
@@ -207,9 +216,9 @@ func (s *store) apply(b []byte) error {
 
 // joinCluster will use the metaclient to join this server to the cluster and
 // return the raft peers so that raft can be started
-func (s *store) joinCluster(metaServers []string) (raftPeers []string, err error) {
+func (s *store) joinCluster(httpAddr, raftAddr string, metaServers []string) (raftPeers []string, err error) {
 	c := NewClient(metaServers, s.config.HTTPSEnabled)
-	if err := c.CreateMetaNode(s.httpln.Addr().String(), s.raftln.Addr().String()); err != nil {
+	if err := c.CreateMetaNode(httpAddr, raftAddr); err != nil {
 		return nil, err
 	}
 	data := c.retryUntilSnapshot()

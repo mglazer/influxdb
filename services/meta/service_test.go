@@ -69,7 +69,7 @@ func TestMetaService_CreateDatabase(t *testing.T) {
 	}
 	defer c.Close()
 
-	c.ExecuteStatement(mustParseStatement("CREATE DATABASE FOO"))
+	c.ExecuteStatement(mustParseStatement("CREATE DATABASE foo"))
 	db, err := c.Database("foo")
 	if err != nil {
 		t.Fatalf(err.Error())
@@ -219,7 +219,6 @@ func exec(s *meta.Service, typ internal.Command_Type, desc *proto.ExtensionDesc,
 
 func newService(cfg *meta.Config) *meta.Service {
 	// Open shared TCP connection.
-	fmt.Println(cfg.BindAddress)
 	ln, err := net.Listen("tcp", cfg.BindAddress)
 	if err != nil {
 		panic(err)

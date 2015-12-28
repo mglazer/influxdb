@@ -23,7 +23,6 @@ type Service struct {
 	node     *influxdb.Node
 	handler  *handler
 	ln       net.Listener
-	raftAddr string
 	httpAddr string
 	https    bool
 	cert     string
@@ -36,7 +35,6 @@ type Service struct {
 func NewService(c *Config, node *influxdb.Node) *Service {
 	s := &Service{
 		config:   c,
-		raftAddr: c.BindAddress,
 		httpAddr: c.HTTPBindAddress,
 		https:    c.HTTPSEnabled,
 		cert:     c.HTTPSCertificate,
@@ -53,17 +51,6 @@ func (s *Service) Open() error {
 	if s.RaftListener == nil {
 		panic("no raft listener set")
 	}
-
-	// Open the store
-	s.store = newStore(s.config)
-	if err := s.store.open(s.ln, s.RaftListener); err != nil {
-		return err
-	}
-
-	handler := newHandler(s.config)
-	handler.logger = s.Logger
-	handler.store = s.store
-	s.handler = handler
 
 	// Open listener.
 	if s.https {
@@ -91,6 +78,17 @@ func (s *Service) Open() error {
 		s.ln = listener
 	}
 	s.httpAddr = s.ln.Addr().String()
+
+	// Open the store
+	s.store = newStore(s.config)
+	if err := s.store.open(s.ln.Addr().String(), s.RaftListener); err != nil {
+		return err
+	}
+
+	handler := newHandler(s.config)
+	handler.logger = s.Logger
+	handler.store = s.store
+	s.handler = handler
 
 	// Begin listening for requests in a separate goroutine.
 	go s.serve()
