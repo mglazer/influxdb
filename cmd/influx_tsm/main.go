@@ -136,20 +136,12 @@ func main() {
 
 	// Backup each directory.
 	for _, db := range tsdb.ShardInfos(shards).Databases() {
-		dest := filepath.Join(dataPath, db+"."+backupExt)
-		src := filepath.Join(dataPath, db)
-
-		if _, err := os.Stat(dest); !os.IsNotExist(err) {
-			fmt.Printf("Backup of database %s already exists\n", db)
-			os.Exit(1)
-		}
-
-		err = copyDir(dest, src)
+		err := backupDatabase(filepath.Join(dataPath, db))
 		if err != nil {
 			fmt.Printf("Backup of database %s failed: %s\n", db, err.Error())
 			os.Exit(1)
 		}
-		fmt.Printf("Database %s backed up to %s\n", db, dest)
+		fmt.Printf("Database %s backed up.\n", db)
 	}
 
 	// Convert each shard.
@@ -200,6 +192,15 @@ func main() {
 		// Success!
 		fmt.Printf("Conversion of %s successful (%s)\n", src, time.Now().Sub(start))
 	}
+}
+
+// backupDatabase backs up the database at src.
+func backupDatabase(src string) error {
+	dest := filepath.Join(src + "." + backupExt)
+	if _, err := os.Stat(dest); !os.IsNotExist(err) {
+		return fmt.Errorf("backup of %s already exists", src)
+	}
+	return copyDir(dest, src)
 }
 
 // copyDir copies the directory at src to dest. If dest does not exist it
